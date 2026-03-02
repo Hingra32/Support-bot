@@ -44,6 +44,20 @@ def connect_db():
 
 threading.Thread(target=connect_db, daemon=True).start()
 
+def auto_delete_resolved():
+    while True:
+        try:
+            time.sleep(3600) # Check every hour
+            if db:
+                for s in CATEGORIES.values():
+                    col = get_ticket_col(s['slug'])
+                    if col:
+                        cutoff = datetime.now() - timedelta(days=30)
+                        col.delete_many({"status": "resolved", "resolved_at": {"$lt": cutoff}})
+        except: pass
+
+threading.Thread(target=auto_delete_resolved, daemon=True).start()
+
 def get_ticket_col(slug):
     if db is None: return None
     return db[f"tickets_{slug}"]
@@ -170,7 +184,10 @@ def render_ticket_view(chat_id, msg_id, slug, tid, target_uid, page, status):
         chat_text += f"{sender}: {tag}{h['text']}\n"
 
     kb = types.InlineKeyboardMarkup(row_width=4)
-    if media_btns: kb.row(*media_btns)
+    if media_btns:
+        kb.row(*media_btns)
+        if len(media_btns) > 1:
+            kb.add(types.InlineKeyboardButton("🖼️ VIEW ALL MEDIA", callback_data=f"v_all_med|{slug}|{tid}"))
     if t['status'] == 'open':
         kb.row(types.InlineKeyboardButton("📩 Reply", callback_data=f"t_rep|{slug}|{tid}|{target_uid}|{page}|{status}"),
                types.InlineKeyboardButton("✅ Resolve", callback_data=f"t_res|{slug}|{tid}|{target_uid}|{page}|{status}"))
@@ -200,9 +217,14 @@ def render_self_view(chat_id, msg_id, uid, slug, tid):
         chat_text += f"{sender}: {tag}{h['text']}\n"
 
     kb = types.InlineKeyboardMarkup(row_width=4)
-    if media_btns: kb.row(*media_btns)
-    if t['status'] == 'open' and last_role == 'admin':
-        kb.add(types.InlineKeyboardButton("📩 Reply to Admin", callback_data=f"u_rep|{slug}|{tid}"))
+    if media_btns:
+        kb.row(*media_btns)
+        if len(media_btns) > 1:
+            kb.add(types.InlineKeyboardButton("🖼️ VIEW ALL MEDIA", callback_data=f"v_all_med|{slug}|{tid}"))
+    if t['status'] == 'open':
+        if last_role == 'admin':
+            kb.add(types.InlineKeyboardButton("📩 Reply to Admin", callback_data=f"u_rep|{slug}|{tid}"))
+        kb.add(types.InlineKeyboardButton("✅ Resolve My Ticket", callback_data=f"self_res|{slug}|{tid}"))
     kb.add(types.InlineKeyboardButton("🔙 Back", callback_data=f"self_tix|1|{t['status']}"))
     smart_edit(chat_id, msg_id, chat_text, reply_markup=kb)
 
@@ -263,6 +285,28 @@ def process_action(action, uid, chat_id, msg_id, call_id, is_back=False):
                 if m_type == 'photo': bot.send_photo(chat_id, file_id, caption=caption)
                 else: bot.send_video(chat_id, file_id, caption=caption)
             except: bot.answer_callback_query(call_id, "❌ Error sending file.")
+    elif action.startswith("v_all_med|"):
+        _, s, tid = action.split("|"); col = get_ticket_col(s); t = col.find_one({"_id": tid})
+        if not t: return
+        media_list = []
+        if 'photo' in t: media_list.append(types.InputMediaPhoto(t['photo'], caption=f"🎫 Ticket #{tid} - #0"))
+        elif 'video' in t: media_list.append(types.InputMediaVideo(t['video'], caption=f"🎫 Ticket #{tid} - #0"))
+        for h in t.get('history', []):
+            if 'photo' in h: media_list.append(types.InputMediaPhoto(h['photo'], caption=f"Message #{h['index']}"))
+            elif 'video' in h: media_list.append(types.InputMediaVideo(h['video'], caption=f"Message #{h['index']}"))
+        if media_list:
+            for i in range(0, len(media_list), 10):
+                try: bot.send_media_group(chat_id, media_list[i:i+10])
+                except: bot.answer_callback_query(call_id, "❌ Error sending album.")
+        else: bot.answer_callback_query(call_id, "❌ No media found.")
+    elif action.startswith("t_res|"):
+        _, s, tid, t_uid, p, st = action.split("|"); col = get_ticket_col(s)
+        col.update_one({"_id": tid}, {"$set": {"status": "resolved", "resolved_at": datetime.now()}})
+        render_user_tickets(chat_id, msg_id, uid, s, t_uid, p, "open", notification=f"✅ Ticket #{tid} Resolved!")
+    elif action.startswith("self_res|"):
+        _, s, tid = action.split("|"); col = get_ticket_col(s)
+        col.update_one({"_id": tid}, {"$set": {"status": "resolved", "resolved_at": datetime.now()}})
+        render_self_tickets(chat_id, msg_id, uid, 1, "open")
     elif action.startswith("t_rep|"):
         _, s, tid, t_uid, p, st = action.split("|")
         user_states[uid].update({'state': 'admin_reply', 'tid': tid, 'slug': s, 'target_uid': int(t_uid), 'page': p, 'status': st, 'chat_id': chat_id, 'msg_id': msg_id, 'time': time.time()})

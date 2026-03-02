@@ -104,22 +104,50 @@ def render_user_list(chat_id, msg_id, uid, slug, page=1):
     per_page = 10; total_pages = max(1, (count + per_page - 1) // per_page)
     page = max(1, min(page, total_pages))
     if uid not in user_states: user_states[uid] = {}
-    user_states[uid]['list_config'] = {'type': 'u_list', 'slug': slug, 'total': total_pages}
+    user_states[uid]['list_config'] = {'type': 'u_list', 'slug': slug, 'total': total_pages, 'page': page}
     pipeline = [
         {"$group": {"_id": "$user_id", "last_ticket": {"$max": "$created_at"}, "name": {"$first": "$name"}, "username": {"$first": "$username"}}},
         {"$sort": {"last_ticket": -1}}, {"$skip": (page - 1) * per_page}, {"$limit": per_page}
     ]
     current = list(col.aggregate(pipeline))
-    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb = types.InlineKeyboardMarkup(row_width=2)
     if count == 0:
         kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="t_menu"))
         smart_edit(chat_id, msg_id, f"✅ *No users in {slug.upper()}*", reply_markup=kb); return
+    
+    btns = []
     for u in current:
         name = u.get("username") or u.get("name") or f"User {u['_id']}"
-        kb.add(types.InlineKeyboardButton(f"👤 {name}", callback_data=f"u_tix|{slug}|{u['_id']}|1|open"))
+        btns.append(types.InlineKeyboardButton(f"👤 {name}", callback_data=f"u_tix|{slug}|{u['_id']}|1|open"))
+    kb.add(*btns)
+    
     kb.row(*get_pagination_row(f"u_list|{slug}|", page, total_pages))
     kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="t_menu"))
     smart_edit(chat_id, msg_id, f"👥 *Users in {slug.upper()}*", reply_markup=kb)
+
+def render_page_list(chat_id, msg_id, uid):
+    config = user_states.get(uid, {}).get('list_config')
+    if not config: return
+    total = config['total']; kb = types.InlineKeyboardMarkup()
+    btns = []
+    for i in range(1, total + 1):
+        if config['type'] == 'u_list':
+            cb = f"u_list|{config['slug']}|{i}"
+        else:
+            cb = f"u_tix|{config['slug']}|{config['target_uid']}|{i}|{config['status']}"
+        btns.append(types.InlineKeyboardButton(str(i), callback_data=cb))
+    
+    for i in range(0, len(btns), 5):
+        kb.row(*btns[i:i+5])
+    
+    close_cb = "ignore"
+    if config['type'] == 'u_list':
+        close_cb = f"u_list|{config['slug']}|{config.get('page', 1)}"
+    else:
+        close_cb = f"u_tix|{config['slug']}|{config['target_uid']}|{config.get('page', 1)}|{config['status']}"
+    
+    kb.add(types.InlineKeyboardButton("❌ CLOSE", callback_data=close_cb))
+    smart_edit(chat_id, msg_id, "🔢 *Select Page:*", reply_markup=kb)
 
 def render_user_tickets(chat_id, msg_id, uid, slug, target_uid, page=1, status="open", notification=""):
     page = int(page); target_uid = int(target_uid); col = get_ticket_col(slug)
@@ -128,13 +156,17 @@ def render_user_tickets(chat_id, msg_id, uid, slug, target_uid, page=1, status="
     per_page = 10; total_pages = max(1, (count + per_page - 1) // per_page)
     page = max(1, min(page, total_pages))
     if uid not in user_states: user_states[uid] = {}
-    user_states[uid]['list_config'] = {'type': 'u_tix', 'slug': slug, 'target_uid': target_uid, 'status': status, 'total': total_pages}
-    kb = types.InlineKeyboardMarkup(row_width=1)
+    user_states[uid]['list_config'] = {'type': 'u_tix', 'slug': slug, 'target_uid': target_uid, 'status': status, 'total': total_pages, 'page': page}
+    kb = types.InlineKeyboardMarkup(row_width=2)
     other_status = "resolved" if status == "open" else "open"
-    kb.add(types.InlineKeyboardButton("✅ Show Resolved" if status == "open" else "🟢 Show Open", callback_data=f"u_tix|{slug}|{target_uid}|1|{other_status}"))
+    kb.row(types.InlineKeyboardButton("✅ Show Resolved" if status == "open" else "🟢 Show Open", callback_data=f"u_tix|{slug}|{target_uid}|1|{other_status}"))
     current = list(col.find(query).sort("created_at", -1).skip((page - 1) * per_page).limit(per_page))
+    
+    btns = []
     for t in current:
-        kb.add(types.InlineKeyboardButton(f"🎫 #{t['_id']}", callback_data=f"t_view|{slug}|{t['_id']}|{target_uid}|{page}|{status}"))
+        btns.append(types.InlineKeyboardButton(f"🎫 #{t['_id']}", callback_data=f"t_view|{slug}|{t['_id']}|{target_uid}|{page}|{status}"))
+    kb.add(*btns)
+    
     if count > 0: kb.row(*get_pagination_row(f"u_tix|{slug}|{target_uid}|", page, total_pages, suffix=f"|{status}"))
     kb.add(types.InlineKeyboardButton("🔙 BACK TO USER LIST", callback_data=f"nav_back"))
     title = f"🛠 *Tickets for User {target_uid}* ({status.upper()})"
@@ -228,6 +260,21 @@ def render_self_view(chat_id, msg_id, uid, slug, tid):
     kb.add(types.InlineKeyboardButton("🔙 Back", callback_data=f"self_tix|1|{t['status']}"))
     smart_edit(chat_id, msg_id, chat_text, reply_markup=kb)
 
+def render_main_menu(chat_id, msg_id, uid):
+    kb = types.InlineKeyboardMarkup()
+    if is_admin(uid):
+        kb.add(types.InlineKeyboardButton("📂 View Tickets", callback_data="t_menu"))
+    else:
+        for k, v in CATEGORIES.items():
+            kb.add(types.InlineKeyboardButton(f"{v['icon']} {k}", callback_data=f"cat|{v['slug']}"))
+        kb.add(types.InlineKeyboardButton("🎫 Check My Tickets", callback_data="self_tix|1|open"))
+    
+    text = "👋 *Support Bot Active*"
+    if msg_id:
+        smart_edit(chat_id, msg_id, text, reply_markup=kb)
+    else:
+        bot.send_message(chat_id, text, reply_markup=kb)
+
 # --- ROUTER ---
 def process_action(action, uid, chat_id, msg_id, call_id, is_back=False):
     if uid not in user_states: user_states[uid] = {}
@@ -250,6 +297,8 @@ def process_action(action, uid, chat_id, msg_id, call_id, is_back=False):
     elif action == "close_menu":
         try: bot.delete_message(chat_id, msg_id)
         except: pass
+    elif action == "page_list":
+        render_page_list(chat_id, msg_id, uid)
     elif action.startswith("adm_cat|"):
         process_action(f"u_list|{action.split('|')[1]}|1", uid, chat_id, msg_id, call_id)
     elif action.startswith("u_list|"):
@@ -325,17 +374,12 @@ def process_action(action, uid, chat_id, msg_id, call_id, is_back=False):
         user_states[uid] = {'state': 'waiting', 'slug': action.split("|")[1], 'time': time.time()}
         smart_edit(chat_id, msg_id, f"📝 *Category: {user_states[uid]['slug'].upper()}*\nPlease describe your issue:", reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Cancel", callback_data="user_start")))
     elif action == "user_start":
-        user_states.pop(uid, None); start(types.Message(None, None, None, types.User(uid, False, "User"), None, None, None))
+        user_states.pop(uid, None); render_main_menu(chat_id, msg_id, uid)
 
 # --- HANDLERS ---
 @bot.message_handler(commands=['start'])
 def start(message):
-    uid = message.chat.id; kb = types.InlineKeyboardMarkup()
-    if is_admin(uid): kb.add(types.InlineKeyboardButton("📂 View Tickets", callback_data="t_menu"))
-    else:
-        for k, v in CATEGORIES.items(): kb.add(types.InlineKeyboardButton(f"{v['icon']} {k}", callback_data=f"cat|{v['slug']}"))
-        kb.add(types.InlineKeyboardButton("🎫 Check My Tickets", callback_data="self_tix|1|open"))
-    bot.send_message(uid, "👋 *Support Bot Active*", reply_markup=kb)
+    render_main_menu(message.chat.id, None, message.from_user.id)
 
 @bot.message_handler(commands=['check'])
 def check_cmd(message): render_self_tickets(message.chat.id, None, message.from_user.id, 1, "open")
